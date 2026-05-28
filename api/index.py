@@ -16,18 +16,47 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 COBALT_DIRECTORY_API = "https://cobalt.directory/api/tests"
 COBALT_TIMEOUT = 8
 MIN_SCORE = 50
 INSTANCE_CACHE_TTL = 300  # 5 minutes
 
-# ─── In-memory caches (warm invocations only) ───────────────────────────────────
+# ─── In-memory caches (warm invocations only) ─────────────────────────────────
 _instance_cache: List[str] = []
 _last_fetch = 0.0
 _bot_username: Optional[str] = None
 
+# ─── Lazy Application ─────────────────────────────────────────────────────────
+_application: Optional[Application] = None
+_app_initialized = False
+
+def get_application() -> Application:
+    global _application
+    if _application is None:
+        if not BOT_TOKEN:
+            raise RuntimeError("BOT_TOKEN environment variable is not set")
+        _application = Application.builder().token(BOT_TOKEN).build()
+        _application.add_handler(CommandHandler("start", start))
+        _application.add_handler(InlineQueryHandler(inline_query))
+        _application.add_error_handler(error_handler)
+    return _application
+
+async def ensure_initialized():
+    global _app_initialized
+    if not _app_initialized:
+        app = get_application()
+        await app.initialize()
+        _app_initialized = True
+
+async def process_update(update_data: dict):
+    await ensure_initialized()
+    app = get_application()
+    update = Update.de_json(update_data, app.bot)
+    await app.process_update(update)
+
+# ─── Instance fetcher ─────────────────────────────────────────────────────────
 
 async def fetch_instances() -> List[str]:
     """Fetch working cobalt instances from cobalt.directory API."""
@@ -57,7 +86,6 @@ async def fetch_instances() -> List[str]:
                         api_domain = item.get("api", "")
                         if not api_domain:
                             continue
-                        # Skip official imput.net instances — they often require API keys / IP auth
                         if api_domain.endswith(".imput.net"):
                             continue
                         raw.append({"url": f"{protocol}://{api_domain}", "score": score})
@@ -72,7 +100,6 @@ async def fetch_instances() -> List[str]:
             return _instance_cache
 
     return instances
-
 
 class CobaltClient:
     """Try cobalt instances until one returns a usable media link."""
@@ -158,8 +185,7 @@ class CobaltClient:
         audio_exts = ["mp3", "m4a", "opus", "ogg", "wav"]
         return "audio" if ext in audio_exts else "video"
 
-
-# ─── Telegram handlers ──────────────────────────────────────────────────────────
+# ─── Telegram handlers ─────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -169,7 +195,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 Tip: Add 'audio' before the link for audio-only!"
     )
 
-
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.inline_query.query.strip()
 
@@ -178,7 +203,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             id="help",
             title="📥 Send a link to download media",
             input_message_content=InputTextMessageContent(
-                message_text="Usage: @YourBotName <url>\nSupported: YouTube, Instagram, TikTok, Twitter, etc."
+                message_text="Usage: @YourBotName \nSupported: YouTube, Instagram, TikTok, Twitter, etc."
             ),
             description="Paste the link here!",
             thumbnail_url="https://cdn-icons-png.flaticon.com/512/482/482059.png",
@@ -231,14 +256,13 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type = result["type"]
     emoji = "🎵" if media_type == "audio" else "📹"
 
-    # Cache bot username to avoid repeated getMe() calls
     global _bot_username
     if _bot_username is None:
         me = await context.bot.get_me()
         _bot_username = me.username
 
     message_text = (
-        f"{emoji} <a href='{media_url}'>{media_type}</a> fetched via @{_bot_username}"
+        f"{emoji} {media_type} fetched via @{_bot_username}"
     )
 
     results = [
@@ -256,38 +280,25 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.inline_query.answer(results, cache_time=0)
 
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
-
-# ─── Application setup ──────────────────────────────────────────────────────────
-
-application = Application.builder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(InlineQueryHandler(inline_query))
-application.add_error_handler(error_handler)
-
-_app_initialized = False
-
-
-async def ensure_initialized():
-    global _app_initialized
-    if not _app_initialized:
-        await application.initialize()
-        _app_initialized = True
-
-
-async def process_update(update_data: dict):
-    await ensure_initialized()
-    update = Update.de_json(update_data, application.bot)
-    await application.process_update(update)
-
-
-# ─── Vercel serverless handler ──────────────────────────────────────────────────
+# ─── Vercel serverless handler ─────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
+    _webhook_set = False
+
+    def _ensure_webhook(self):
+        if not handler._webhook_set and WEBHOOK_URL:
+            try:
+                asyncio.run(get_application().bot.set_webhook(url=WEBHOOK_URL))
+                handler._webhook_set = True
+                logger.info(f"Webhook set to {WEBHOOK_URL}")
+            except Exception as e:
+                logger.error(f"Failed to set webhook: {e}")
+
     def do_POST(self):
+        self._ensure_webhook()
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
         try:
@@ -303,15 +314,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode())
 
     def do_GET(self):
+        self._ensure_webhook()
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running! Use POST for webhook updates.")
-
-
-# ─── Auto-set webhook on cold start ────────────────────────────────────────────
-if WEBHOOK_URL:
-    try:
-        asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
-        logger.info(f"Webhook set to {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
