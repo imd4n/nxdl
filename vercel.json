@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/bot.py": {
+      "maxDuration": 30
+    }
+  }
+}

@@ -1,113 +1,165 @@
 import os
+import json
 import asyncio
 import aiohttp
 import logging
+import time
 from typing import Optional, List
-from dotenv import load_dotenv
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, CommandHandler, InlineQueryHandler, ContextTypes
 from uuid import uuid4
-
-load_dotenv()
+from http.server import BaseHTTPRequestHandler
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Config
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-COBALT_INSTANCES = os.getenv("COBALT_INSTANCES", "").split(",")
-COBALT_TIMEOUT = 8  # seconds
+# ─── Config ───────────────────────────────────────────────────────────────────
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+COBALT_DIRECTORY_API = "https://cobalt.directory/api/tests"
+COBALT_TIMEOUT = 8
+MIN_SCORE = 50
+INSTANCE_CACHE_TTL = 300  # 5 minutes
 
-if not BOT_TOKEN or not COBALT_INSTANCES:
-    raise ValueError("Missing BOT_TOKEN or COBALT_INSTANCES")
+# ─── In-memory caches (warm invocations only) ───────────────────────────────────
+_instance_cache: List[str] = []
+_last_fetch = 0.0
+_bot_username: Optional[str] = None
+
+
+async def fetch_instances() -> List[str]:
+    """Fetch working cobalt instances from cobalt.directory API."""
+    global _instance_cache, _last_fetch
+    now = time.time()
+    if _instance_cache and (now - _last_fetch) < INSTANCE_CACHE_TTL:
+        return _instance_cache
+
+    instances = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                COBALT_DIRECTORY_API,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Accept": "application/json"},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    raw = []
+                    for item in data.get("data", []):
+                        if not item.get("online"):
+                            continue
+                        score = item.get("score", 0)
+                        if score < MIN_SCORE:
+                            continue
+                        protocol = item.get("protocol", "https")
+                        api_domain = item.get("api", "")
+                        if not api_domain:
+                            continue
+                        # Skip official imput.net instances — they often require API keys / IP auth
+                        if api_domain.endswith(".imput.net"):
+                            continue
+                        raw.append({"url": f"{protocol}://{api_domain}", "score": score})
+                    raw.sort(key=lambda x: x["score"], reverse=True)
+                    instances = [i["url"] for i in raw]
+                    _instance_cache = instances
+                    _last_fetch = now
+                    logger.info(f"Fetched {len(instances)} instances from cobalt.directory")
+    except Exception as e:
+        logger.error(f"Failed to fetch instances: {e}")
+        if _instance_cache:
+            return _instance_cache
+
+    return instances
+
 
 class CobaltClient:
+    """Try cobalt instances until one returns a usable media link."""
+
     def __init__(self, instances: List[str]):
-        self.instances = [url.strip().rstrip('/') for url in instances if url]
+        self.instances = [url.strip().rstrip("/") for url in instances if url]
         self.session: Optional[aiohttp.ClientSession] = None
-    
+
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.session:
             await self.session.close()
-    
+
     async def extract_media(self, url: str, audio_only: bool = False) -> Optional[dict]:
-        """Try each Cobalt instance until one works"""
         payload = {
             "url": url.strip(),
             "videoQuality": "720",
             "audioFormat": "mp3",
-            "downloadMode": "audio" if audio_only else "auto"
+            "downloadMode": "audio" if audio_only else "auto",
         }
-        
         headers = {
             "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         for instance in self.instances:
             try:
                 api_url = f"{instance}/"
                 logger.info(f"Trying {api_url} for {url}")
-                
                 async with self.session.post(
-                    api_url, 
-                    json=payload, 
+                    api_url,
+                    json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=COBALT_TIMEOUT)
+                    timeout=aiohttp.ClientTimeout(total=COBALT_TIMEOUT),
                 ) as response:
-                    
                     if response.status == 200:
                         data = await response.json()
                         status = data.get("status")
                         logger.info(f"Response from {instance}: {status}")
-                        
+
                         if status in ("tunnel", "redirect"):
                             return {
                                 "url": data.get("url"),
                                 "title": data.get("filename", "Media"),
-                                "type": "audio" if audio_only else self._detect_type(data.get("filename", ""))
+                                "type": "audio"
+                                if audio_only
+                                else self._detect_type(data.get("filename", "")),
                             }
                         elif status == "picker":
                             if data.get("audio"):
                                 return {
                                     "url": data["audio"],
                                     "title": "Audio",
-                                    "type": "audio"
+                                    "type": "audio",
                                 }
                             elif data.get("picking") and len(data["picking"]) > 0:
                                 pick = data["picking"][0]
                                 return {
                                     "url": pick.get("url"),
                                     "title": pick.get("filename", "Media"),
-                                    "type": "video"
+                                    "type": "video",
                                 }
                         elif status == "error":
                             logger.warning(f"Cobalt error: {data.get('error', {})}")
                             continue
                     else:
                         logger.warning(f"HTTP {response.status} from {instance}")
-                        
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout from {instance}")
                 continue
             except Exception as e:
                 logger.error(f"Error with {instance}: {e}")
                 continue
-        
         return None
-    
+
     def _detect_type(self, filename: str) -> str:
         if not filename:
             return "video"
-        ext = filename.split('.')[-1].lower()
-        audio_exts = ['mp3', 'm4a', 'opus', 'ogg', 'wav']
+        ext = filename.split(".")[-1].lower()
+        audio_exts = ["mp3", "m4a", "opus", "ogg", "wav"]
         return "audio" if ext in audio_exts else "video"
+
+
+# ─── Telegram handlers ──────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -117,11 +169,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💡 Tip: Add 'audio' before the link for audio-only!"
     )
 
+
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline queries"""
     query = update.inline_query.query.strip()
-    
-    if not query or not query.startswith(('http://', 'https://')):
+
+    if not query or not query.startswith(("http://", "https://")):
         help_result = InlineQueryResultArticle(
             id="help",
             title="📥 Send a link to download media",
@@ -129,26 +181,38 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_text="Usage: @YourBotName <url>\nSupported: YouTube, Instagram, TikTok, Twitter, etc."
             ),
             description="Paste the link here!",
-            thumbnail_url="https://cdn-icons-png.flaticon.com/512/482/482059.png"  # Fixed: was thumb_url
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/482/482059.png",
         )
         await update.inline_query.answer([help_result], cache_time=1)
         return
-    
-    # Check for audio prefix
+
     audio_only = False
     url = query
-    if query.lower().startswith('audio '):
+    if query.lower().startswith("audio "):
         audio_only = True
         url = query[6:].strip()
-    
-    if not url.startswith(('http://', 'https://')):
+
+    if not url.startswith(("http://", "https://")):
         await update.inline_query.answer([], cache_time=0)
         return
-    
-    # Extract with Cobalt
-    async with CobaltClient(COBALT_INSTANCES) as client:
+
+    instances = await fetch_instances()
+    if not instances:
+        error_result = InlineQueryResultArticle(
+            id=str(uuid4()),
+            title="❌ No working cobalt instances found",
+            input_message_content=InputTextMessageContent(
+                message_text="❌ Couldn't find any working cobalt instances. Please try again later."
+            ),
+            description="cobalt.directory unreachable",
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/463/463612.png",
+        )
+        await update.inline_query.answer([error_result], cache_time=0)
+        return
+
+    async with CobaltClient(instances) as client:
         result = await client.extract_media(url, audio_only=audio_only)
-    
+
     if not result:
         error_result = InlineQueryResultArticle(
             id=str(uuid4()),
@@ -157,51 +221,97 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_text=f"❌ Couldn't extract media from:\n{url}\n\nThe link might be unsupported or private."
             ),
             description="Try again or check the link",
-            thumbnail_url="https://cdn-icons-png.flaticon.com/512/463/463612.png"  # Fixed: was thumb_url
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/463/463612.png",
         )
         await update.inline_query.answer([error_result], cache_time=0)
         return
-    
+
     media_url = result["url"]
     title = result["title"]
-    bot_username = (await context.bot.get_me()).username
-    
-    media_type = result["type"]  # "video" or "audio"
+    media_type = result["type"]
     emoji = "🎵" if media_type == "audio" else "📹"
-    
-    # Format: "video fetched via @bot" with clickable link on "video"
+
+    # Cache bot username to avoid repeated getMe() calls
+    global _bot_username
+    if _bot_username is None:
+        me = await context.bot.get_me()
+        _bot_username = me.username
+
     message_text = (
-        f"{emoji} <a href='{media_url}'>{media_type}</a> fetched via @{bot_username}"
+        f"{emoji} <a href='{media_url}'>{media_type}</a> fetched via @{_bot_username}"
     )
-    
+
     results = [
         InlineQueryResultArticle(
             id=str(uuid4()),
             title=f"{emoji} {title[:50]}",
             input_message_content=InputTextMessageContent(
-                message_text=message_text,
-                parse_mode='HTML'
+                message_text=message_text, parse_mode="HTML"
             ),
             description=f"Click to send {media_type} link",
-            thumbnail_url="https://cdn-icons-png.flaticon.com/512/724/724933.png" if media_type == "video" else "https://cdn-icons-png.flaticon.com/512/727/727218.png"
+            thumbnail_url="https://cdn-icons-png.flaticon.com/512/724/724933.png"
+            if media_type == "video"
+            else "https://cdn-icons-png.flaticon.com/512/727/727218.png",
         )
     ]
-    
     await update.inline_query.answer(results, cache_time=0)
+
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error {context.error}")
 
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(InlineQueryHandler(inline_query))
-    application.add_error_handler(error_handler)
-    
-    print("🤖 Bot is running...")
-    
-    application.run_polling()
 
-if __name__ == "__main__":
-    main()
+# ─── Application setup ──────────────────────────────────────────────────────────
+
+application = Application.builder().token(BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(InlineQueryHandler(inline_query))
+application.add_error_handler(error_handler)
+
+_app_initialized = False
+
+
+async def ensure_initialized():
+    global _app_initialized
+    if not _app_initialized:
+        await application.initialize()
+        _app_initialized = True
+
+
+async def process_update(update_data: dict):
+    await ensure_initialized()
+    update = Update.de_json(update_data, application.bot)
+    await application.process_update(update)
+
+
+# ─── Vercel serverless handler ──────────────────────────────────────────────────
+
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+        try:
+            update_data = json.loads(body)
+            asyncio.run(process_update(update_data))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except Exception as e:
+            logger.error(f"Error processing update: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running! Use POST for webhook updates.")
+
+
+# ─── Auto-set webhook on cold start ────────────────────────────────────────────
+if WEBHOOK_URL:
+    try:
+        asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
