@@ -203,7 +203,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             id="help",
             title="📥 Send a link to download media",
             input_message_content=InputTextMessageContent(
-                message_text="Usage: @YourBotName \nSupported: YouTube, Instagram, TikTok, Twitter, etc."
+                message_text="Usage: @nxdlbot \nSupported: currently only Instagram, because Cobalt"
             ),
             description="Paste the link here!",
             thumbnail_url="https://cdn-icons-png.flaticon.com/512/482/482059.png",
@@ -262,7 +262,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _bot_username = me.username
 
     message_text = (
-        f"{emoji} {media_type} fetched via @{_bot_username}"
+        f"{emoji} <a href='{media_url}'>{media_type}</a> fetched via @{_bot_username}"
     )
 
     results = [
