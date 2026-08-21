@@ -2,8 +2,6 @@
 
 Гибридный бот для загрузки медиа: **Cobalt API (приоритет) + yt-dlp fallback**, хостинг в **Termux** на Android (polling, aiogram 3.x).
 
-Реализация по плану [plan_v1.1.md](plan_v1.1.md). Также сохранён legacy Vercel-вариант в `api/index.py`.
-
 ## Структура (v1.1)
 
 ```
