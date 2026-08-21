@@ -1,0 +1,3 @@
+-- cdn_expires_at already in 001, ensure column exists
+-- SQLite ADD COLUMN IF NOT EXISTS emulation via try
+-- This migration is idempotent via Python check

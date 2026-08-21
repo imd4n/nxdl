@@ -1,0 +1,23 @@
+{
+    "bot_token": "123456:ABC-DEF...",
+    "admin_id": 123456789,
+    "max_concurrent_global": 2,
+    "max_concurrent_per_user": 1,
+    "cobalt_url": "http://localhost:9000",
+    "cobalt_api_path": "/api/json",
+    "cache_limit_gb": 4,
+    "default_downloader": "auto",
+    "cleanup_interval_sec": 3600,
+    "max_telegram_size_mb": 50,
+    "auto_compress": true,
+    "compress_strategy": "downgrade_quality",
+    "max_telegram_caption_length": 1024,
+    "url_whitelist": ["youtube.com", "youtu.be", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com", "v.redd.it"],
+    "block_private_ips": true,
+    "yt_dlp_auto_update": true,
+    "yt_dlp_update_interval_hours": 48,
+    "healthcheck_port": 8080,
+    "log_max_bytes": 10485760,
+    "log_backup_count": 5,
+    "placeholder_video_file_id": ""
+}

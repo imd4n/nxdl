@@ -1,0 +1,12 @@
+bot.db
+bot.db-*
+downloads/*
+!downloads/.gitkeep
+logs/*
+!logs/.gitkeep
+cookies/cookies.txt
+__pycache__/
+*.pyc
+.env
+config.json
+!config.json.example

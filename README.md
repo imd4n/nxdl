@@ -1,48 +1,95 @@
-# nxDL — Telegram Media Downloader Bot
+# nxDLbot — Telegram Media Downloader (Termux)
 
-A serverless Telegram inline bot that downloads media mainly from Instagram, here cobalt doesn't really work on anything else, wish I knew why.
-Powered by [cobalt.directory](https://cobalt.directory) API for automatic instance discovery.
+Гибридный бот для загрузки медиа: **Cobalt API (приоритет) + yt-dlp fallback**, хостинг в **Termux** на Android (polling, aiogram 3.x).
 
-## Changes from `v1`
+Реализация по плану [plan_v1.1.md](plan_v1.1.md). Также сохранён legacy Vercel-вариант в `api/index.py`.
 
-- **Vercel-ready**: Webhook-based instead of polling (required for serverless).
-- **Dynamic instances**: Fetches working cobalt instances from `https://cobalt.directory/api/tests` instead of hardcoded `COBALT_INSTANCES`.
-- **No `.env` file needed**: Uses Vercel Environment Variables.
+## Структура (v1.1)
 
-## Deploy to Vercel
+```
+~/nxDLbot/  (или корень репозитория)
+├── bot.py                 # Точка входа, хендлеры, graceful shutdown
+├── config.json            # Конфигурация (см. config.json.example)
+├── requirements.txt
+├── bot.db                 # SQLite (создаётся автоматически)
+├── downloads/             # LRU-кэш (4 GB)
+├── logs/                  # Ротированные логи
+├── cookies/               # cookies.txt для Instagram/приватного контента
+├── downloaders/
+│   ├── cobalt.py          # Cobalt API (конфигурируемый endpoint)
+│   └── ytdlp.py           # yt-dlp subprocess + downgrade_quality
+└── utils/
+    ├── db.py              # Миграции SQLite
+    ├── security.py        # SSRF, whitelist, private IP
+    ├── rate_limiter.py    # Семафор + rate limit
+    ├── helpers.py         # Парсинг URL/флагов
+    └── cache_manager.py   # LRU + синхронизация БД↔ФС
+```
 
-1. **Fork / upload** this code to a GitHub/GitLab repo.
-2. **Import** the repo in [Vercel Dashboard](https://vercel.com/dashboard).
-3. **Add Environment Variables** in Project Settings:
-   - `BOT_TOKEN` — Get from [@BotFather](https://t.me/BotFather)
-   - `WEBHOOK_URL` — Your Vercel deployment URL + `/api` (e.g. `https://my-bot.vercel.app/api`)
-4. **Deploy**.
-5. (Optional) Open `https://your-project.vercel.app/api` in a browser — you should see "Bot is running!".
-6. Send `/start` to your bot, then use inline mode: `@YourBotName https://youtube.com/watch?v=...`
-
-## Local testing (optional)
+## Быстрый старт (Termux)
 
 ```bash
+pkg update && pkg upgrade
+pkg install python python-pip git ffmpeg nodejs
 pip install -r requirements.txt
-export BOT_TOKEN=your_token
-export WEBHOOK_URL=https://your-ngrok-url.ngrok.io/api
-python api/index.py   # Note: this only starts a local HTTP server, not polling
+# опционально cobalt self-hosted:
+# git clone https://github.com/imputnet/cobalt && cd cobalt && npm install && npm run build
+
+cp config.json.example config.json
+nano config.json  # вставь bot_token от @BotFather, admin_id
+
+python bot.py
 ```
 
-For local webhook testing, use [ngrok](https://ngrok.com) or [localtunnel](https://localtunnel.github.io/www/).
+## Конфиг
 
-## File structure
+См. `config.json.example`. Ключевые поля:
+- `bot_token`, `admin_id`
+- `cobalt_url` + `cobalt_api_path` (по умолчанию `http://localhost:9000/api/json`)
+- `cache_limit_gb`, `max_telegram_size_mb`, `compress_strategy`
+- `url_whitelist`, `block_private_ips`
+- `healthcheck_port` (для watchdog)
+
+## Режимы
+
+- **Чат**: кинь ссылку в чат — бот покажет кнопки качества (720/480/аудио) или сразу скачает. Дубликаты отдаются по `telegram_file_id`.
+- **Инлайн**: `@бот https://...` с флагами `-c` (cobalt), `-y` (yt-dlp), `-a` (аудио). Пустой запрос `@бот ` — история (10 последних).
+
+## Админ-команды
+
+`/stats /cleanup /ban /unban /logs [N] /restart /ytupdate /setdownloader`
+
+## Watchdog & автозапуск
+
+```bash
+# ручной watchdog
+chmod +x watchdog.sh && ./watchdog.sh
+
+# автозапуск (Termux:Boot)
+mkdir -p ~/.termux/boot
+cp start-bot.sh ~/.termux/boot/start-bot.sh
+chmod +x ~/.termux/boot/start-bot.sh
+
+# ADB (LineageOS)
+chmod +x adb-setup.sh && ./adb-setup.sh
+termux-wake-lock
+```
+
+## Cookies (Instagram)
+
+Экспортируй `cookies.txt` (Get cookies.txt LOCALLY) на ПК и скопируй в `cookies/cookies.txt`.
+
+## Vercel (legacy)
+
+Старый webhook-бот в `api/index.py` остался для совместимости. Для Termux-режима используй `bot.py` (polling).
+Для Vercel установи `python-telegram-bot` дополнительно: `pip install python-telegram-bot`.
+
+## Зависимости
 
 ```
-.
-├── api/
-│   └── index.py          # Vercel serverless function (bot logic)
-├── requirements.txt      # Python dependencies
+aiogram>=3.0.0
+aiohttp>=3.8.0
+aiosqlite>=0.19.0
+yt-dlp>=2024.1.0
 ```
-
-## Notes
-
-- The bot fetches the cobalt instance list from `cobalt.directory` every 5 minutes (in-memory cache).
-- Official `*.imput.net` instances are skipped because they often require API-key / IP authentication.
-- If no instances are available, the bot returns a friendly error inline result.
-- Had some headaches with deployment on vercel - turns out the `vercel.json` was blocking me, so just deleting it helped.
+Системные: `ffmpeg`, `nodejs` (для self-hosted cobalt).
