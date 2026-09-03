@@ -11,6 +11,7 @@ MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "db_migrations")
 
 async def init_db(db_path: str = DB_PATH):
     """Инициализация БД, применение миграций по user_version."""
+    from .helpers import normalize_url  # lazy: избежать цикла импорта
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA foreign_keys=ON;")
@@ -31,10 +32,30 @@ async def init_db(db_path: str = DB_PATH):
                 try:
                     await db.executescript(sql)
                 except Exception as e:
-                    # для 004 может быть duplicate column — игнорируем
+                    # для 004/005 может быть duplicate column — игнорируем
                     logger.warning(f"Migration {fpath} warning: {e}")
             await db.execute(f"PRAGMA user_version = {idx};")
         await db.commit()
+
+        # backfill url_norm для старых строк (v1.2)
+        try:
+            cols = set()
+            cur = await db.execute("PRAGMA table_info(downloads);")
+            for r in await cur.fetchall():
+                cols.add(r[1])
+            if "url_norm" in cols:
+                cur = await db.execute(
+                    "SELECT id, url FROM downloads WHERE url_norm IS NULL LIMIT 500")
+                rows = await cur.fetchall()
+                for rid, url in rows:
+                    try:
+                        await db.execute("UPDATE downloads SET url_norm = ? WHERE id = ?",
+                                         (normalize_url(url or ""), rid))
+                    except Exception:
+                        pass
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"url_norm backfill failed: {e}")
     logger.info(f"DB initialized at {db_path}, version {len(migration_files)}")
 
 
@@ -58,10 +79,23 @@ async def get_user_history(db_path: str, user_id: int, limit: int = 10):
         return [dict(r) for r in rows]
 
 
-async def find_cached_by_url(db_path: str, url: str):
-    """Поиск дубликата по URL с актуальным file_id или cdn_url."""
+async def find_cached_by_url(db_path: str, url: str, is_audio: bool = False):
+    """Поиск дубликата по нормализованному URL + is_audio (v1.2)."""
+    from .helpers import normalize_url
+    norm = normalize_url(url)
     async with aiosqlite.connect(db_path) as db:
         db.row_factory = aiosqlite.Row
+        # сначала по url_norm (новый формат), затем fallback по точному url
+        cur = await db.execute(
+            """SELECT * FROM downloads WHERE url_norm = ? AND is_audio = ?
+               AND status IN ('done','cached')
+               AND telegram_file_id IS NOT NULL
+               ORDER BY last_accessed DESC LIMIT 1""",
+            (norm, 1 if is_audio else 0),
+        )
+        row = await cur.fetchone()
+        if row:
+            return dict(row)
         cur = await db.execute(
             "SELECT * FROM downloads WHERE url = ? AND status IN ('done','cached') ORDER BY last_accessed DESC LIMIT 1",
             (url,),
@@ -70,12 +104,28 @@ async def find_cached_by_url(db_path: str, url: str):
         return dict(row) if row else None
 
 
-async def insert_download(db_path: str, user_id: int, username: str, url: str, source: str = None, quality: str = None) -> int:
+async def insert_download(db_path: str, user_id: int, username: str, url: str,
+                          source: str = "ytdlp", quality: str | None = None,
+                          is_audio: bool = False) -> int:
+    from .helpers import normalize_url
+    norm = normalize_url(url)
     async with aiosqlite.connect(db_path) as db:
-        cur = await db.execute(
-            "INSERT INTO downloads (user_id, username, url, source, quality, status) VALUES (?, ?, ?, ?, ?, 'pending')",
-            (user_id, username, url, source, quality),
-        )
+        # url_norm может отсутствовать в очень старых БД до миграции — пробуем с ним, иначе без
+        try:
+            cur = await db.execute(
+                "INSERT INTO downloads (user_id, username, url, url_norm, source, quality, is_audio, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')",
+                (user_id, username, url, norm, source, quality, 1 if is_audio else 0),
+            )
+        except Exception:
+            cur = await db.execute(
+                "INSERT INTO downloads (user_id, username, url, source, quality, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+                (user_id, username, url, source, quality),
+            )
+            try:
+                await db.execute("UPDATE downloads SET is_audio = ? WHERE id = ?",
+                                 (1 if is_audio else 0, cur.lastrowid))
+            except Exception:
+                pass
         await db.commit()
         return cur.lastrowid
 

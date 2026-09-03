@@ -14,8 +14,11 @@ BLOCKED_PREFIXES = (
     "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
     "169.254.", "127.",
 )
-# спецсимволы для блокировки injection в subprocess
-DANGEROUS_CHARS = re.compile(r"[;`$&|><\n\r]|\$\(")
+# NOTE(v1.2): yt-dlp вызывается списком аргументов без shell=True,
+# поэтому shell-метасимволы (& ; | && ||) в query-строке URL легитимны
+# (YouTube: watch?v=...&t=...). Блокируем только то, что реально опасно
+# вне shell: управляющие символы, бэктики, $(), угловые скобки.
+DANGEROUS_CHARS = re.compile(r"[`$<>\n\r\t\\]|\$\(|[\x00-\x1f]")
 
 
 def is_private_ip(ip_str: str) -> bool:
