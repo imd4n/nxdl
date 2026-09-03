@@ -39,10 +39,9 @@ bash setup.sh
 **Вручную (если скрипту не доверяешь):**
 
 ```bash
-# 1. База
+# 1. База (Termux:API и Termux:Boot — отдельные приложения с F-Droid, ставятся вручную)
 pkg update && pkg upgrade -y
-pkg install python python-pip git ffmpeg termux-api termux-boot -y
-pip install -r requirements.txt
+pkg install python python-pip git ffmpeg termux-api -y
 
 # 2. Код
 git clone <твой-репо> ~/nxDLbot
@@ -51,13 +50,22 @@ cd ~/nxDLbot
 cp config.json.example config.json
 nano config.json   # вставь bot_token от @BotFather и admin_id
 
-# 3. Настройки BotFather (обязательно для инлайна!)
+# 3. Зависимости (строго из папки бота!)
+pip install --upgrade pip
+pip install -r requirements.txt
+# Пины pydantic + TUR-индекс уже зашиты в requirements.txt: у pydantic-core
+# нет колёс под Android на PyPI, и голый pip падает на сборке через Rust.
+# В requirements лежат pydantic==2.12.4 + pydantic-core==2.41.5 — под них
+# в TUR есть готовые колёса (проверено для Python 3.14/aarch64).
+# ВАЖНО: вводи URL индекса буква в букву — .../pypi/, не .../pupi/ :)
+
+# 4. Настройки BotFather (обязательно для инлайна!)
 # @BotFather → /mybots → твой бот:
 #   /setinline       — включить inline mode (placeholder, например: "🔍 вставь ссылку")
 #   /setinlinefeedback — Enable (иначе бот не узнает о тапе на заглушку!)
 #   /setprivacy      — Disable НЕ нужен (бот читает только ссылки/команды)
 
-# 4. Первый запуск (проверочный, на переднем плане)
+# 5. Первый запуск (проверочный, на переднем плане)
 python bot.py
 # в другом сеансе Termux: curl -sf http://localhost:8080/health && echo ALIVE
 # останови: Ctrl+C
@@ -95,7 +103,9 @@ cp /sdcard/Download/cookies.txt ~/nxDLbot/cookies/cookies.txt
 ## 4. Фон, автозапуск, watchdog
 
 ```bash
-pkg install termux-api termux-boot
+# Termux:Boot — приложение с F-Droid (ставится вручную, пакета в pkg нет).
+# Без него автозапуск после перезагрузки не работает, но сам бот — работает.
+pkg install termux-api
 mkdir -p ~/.termux/boot
 cp ~/nxDLbot/start-bot.sh ~/.termux/boot/start-bot.sh
 chmod +x ~/.termux/boot/start-bot.sh ~/nxDLbot/watchdog.sh
@@ -147,4 +157,22 @@ aiosqlite>=0.19.0
 yt-dlp>=2026.01.01
 ```
 
-Системные: `python`, `ffmpeg`, `termux-api`, `termux-boot`.
+Системные: `python`, `ffmpeg`, `termux-api`, приложение `Termux:Boot` (F-Droid, для автозапуска).
+
+## 10. Если aiogram не ставится (Termux)
+
+Симптом: `pip install` падает на `pydantic-core` / `maturin` / `can't find Rust compiler`.
+Причина: на PyPI нет колёс под Android (bionic libc), pip пытается собрать Rust-пакет из исходников.
+
+1. Штатный путь: `pip install -r requirements.txt` из папки бота — пины
+   (`pydantic==2.12.4`, `pydantic-core==2.41.5`) и TUR-индекс уже внутри файла.
+   Проверь две вещи:
+   - команда запущена именно из `~/nxDLbot` (где лежит requirements.txt);
+   - в логе pip строка `Looking in indexes` содержит `...github.io/pypi/` (именно **pypi**, не `pupi` — такая опечатка уже была :)).
+   Успех выглядит так: `Downloading pydantic_core-2.41.5-...-android_24_arm64_v8a.whl` — сразу `.whl`, без `Building wheel`.
+2. Запасной путь (долго, ~10–20 мин, телефон греется): собрать из исходников:
+   ```bash
+   pkg install rust
+   pip install -r requirements.txt   # не закрывай Termux, держи wakelock: termux-wake-lock
+   ```
+3. Если ошибка НЕ про pydantic-core — скинь хвост лога (`pip install -r requirements.txt` последние 30 строк), разберём.

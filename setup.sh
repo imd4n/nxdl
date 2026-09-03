@@ -7,11 +7,16 @@ BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$BOT_DIR"
 
 echo "=== [1/7] Пакеты Termux ==="
+# NOTE: Termux:Boot — это отдельное приложение с F-Droid, пакета termux-boot нет.
+# Поставь его вручную: Termux:Boot + Termux:API с F-Droid.
 pkg update -y
-pkg install -y python python-pip git ffmpeg termux-api termux-boot
+pkg install -y python python-pip git ffmpeg termux-api
 
 echo "=== [2/7] Python-зависимости ==="
 pip install --upgrade pip
+# Пины pydantic + TUR-индекс уже зашиты в requirements.txt (иначе pip на
+# Android пытается собрать pydantic-core через Rust и падает). Отдельно
+# ничего ставить не нужно — одна команда ставит всё, включая aiogram.
 pip install -r requirements.txt
 pip install -U yt-dlp
 
